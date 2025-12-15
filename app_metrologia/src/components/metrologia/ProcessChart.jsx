@@ -6,8 +6,10 @@ import {
   CategoryScale,
   LinearScale,
   BarElement,
+  BarController, // <--- FALTABA ESTE
   PointElement,
   LineElement,
+  LineController, // <--- Y ESTE
   Title,
   Tooltip,
   Legend,
@@ -16,13 +18,15 @@ import {
 import { Chart } from "react-chartjs-2";
 import annotationPlugin from "chartjs-plugin-annotation";
 
-// 1. Registrar componentes de Chart.js
+// 1. Registrar componentes de Chart.js (AHORA INCLUYENDO CONTROLADORES)
 ChartJS.register(
   CategoryScale,
   LinearScale,
   BarElement,
+  BarController,  // <--- REGISTRADO
   PointElement,
   LineElement,
+  LineController, // <--- REGISTRADO
   Title,
   Tooltip,
   Legend,
@@ -51,15 +55,11 @@ export default function ProcessChart({ data, stats }) {
       return { x: mid, y: count, start, end };
     });
 
-    const maxCount = Math.max(...bins.map(b => b.y));
-
     // B. PREPARAR CURVA DE GAUSS (Suave)
-    // Generamos 100 puntos para que la línea se vea curva
     const curvePoints = [];
     const curveStep = range / 100;
     
-    // Factor de escala para que la curva tenga la misma altura visual que el histograma
-    // Área Histograma ≈ Área Curva.  Altura Pico ≈ (N * step) / (σ * sqrt(2π))
+    // Factor de escala visual
     const factor = (data.length * step) / (stats.sigma * Math.sqrt(2 * Math.PI));
 
     for (let x = minX; x <= maxX; x += curveStep) {
@@ -87,8 +87,8 @@ export default function ProcessChart({ data, stats }) {
           data: curvePoints,
           borderColor: '#1F2373',
           borderWidth: 2,
-          pointRadius: 0, // Sin puntos, solo línea
-          tension: 0.4,   // Suavizado
+          pointRadius: 0,
+          tension: 0.4,
           fill: false,
           order: 1
         }
@@ -102,7 +102,7 @@ export default function ProcessChart({ data, stats }) {
     maintainAspectRatio: false,
     scales: {
       x: {
-        type: 'linear', // Eje X lineal para precisión matemática
+        type: 'linear',
         position: 'bottom',
         title: { display: true, text: 'Medida (mm)' },
         grid: { color: '#f1f5f9' }
@@ -121,6 +121,13 @@ export default function ProcessChart({ data, stats }) {
       tooltip: {
         mode: 'index',
         intersect: false,
+        callbacks: {
+            title: (items) => {
+                if(!items.length) return '';
+                const val = items[0].parsed.x;
+                return `Valor: ${val.toFixed(3)} mm`;
+            }
+        }
       },
       annotation: {
         annotations: {
