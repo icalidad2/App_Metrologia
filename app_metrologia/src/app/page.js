@@ -1,5 +1,6 @@
-import MetrologiaApp from "@/app/components/MetrologiaApp";
+import { redirect } from "next/navigation";
 
-export default function Page() {
-  return <MetrologiaApp />;
-} 
+export default function Home() {
+  // Redirigir automáticamente a la nueva ruta principal
+  redirect("/dashboard");
+}
