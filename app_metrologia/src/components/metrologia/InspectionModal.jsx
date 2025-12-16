@@ -12,6 +12,8 @@ import { Select } from "@/components/ui/Select";
 import { Badge } from "@/components/ui/Badge";
 import { Icons } from "@/components/ui/Icons";
 import IndustrialGraph from "./IndustrialGraph";
+import { useToast } from "@/components/ui/ToastProvider";
+
 
 export default function InspectionModal({ product, onClose }) {
   const [step, setStep] = useState("setup"); // setup | execute
@@ -31,6 +33,8 @@ export default function InspectionModal({ product, onClose }) {
     inspector: "",
     equipment: "QM-Data 200",
   });
+
+  const { showToast } = useToast();
 
   // Configuración fija por ahora
   const piecesPerCavity = 1;
@@ -86,28 +90,41 @@ export default function InspectionModal({ product, onClose }) {
   const deselectAllCavities = () => setSelectedCavities([]);
 
   // Validar antes de pasar a medir
-  const handleStartExecution = () => {
-    setModalMsg({ type: "", text: "" });
+const handleStartExecution = () => {
+  setModalMsg({ type: "", text: "" });
 
-    // Validación de obligatorios
-    if (!formData.lot || !formData.op_order || !formData.operator || selectedCavities.length === 0) {
-      setModalMsg({
-        type: "err",
-        text: "Complete obligatorios: Lote, O.P., Operador y seleccione cavidades.",
-      });
-      return;
-    }
+  if (!formData.lot || !formData.op_order || !formData.operator || selectedCavities.length === 0) {
+    setModalMsg({
+      type: "err",
+      text: "Complete obligatorios: Lote, O.P., Operador y seleccione cavidades.",
+    });
+    showToast({
+      variant: "error",
+      title: "Faltan datos",
+      message: "Completa Lote, O.P., Operador y selecciona cavidades.",
+    });
+    return;
+  }
 
-    if (!dims.length) {
-      setModalMsg({
-        type: "err",
-        text: "No hay dimensiones cargadas para esta referencia.",
-      });
-      return;
-    }
+  if (!dims.length) {
+    setModalMsg({ type: "err", text: "No hay dimensiones cargadas para esta referencia." });
+    showToast({
+      variant: "error",
+      title: "Sin dimensiones",
+      message: "Esta referencia no tiene variables configuradas.",
+    });
+    return;
+  }
 
-    setStep("execute");
-  };
+  showToast({
+    variant: "success",
+    title: "Muestra registrada",
+    message: `Lote ${formData.lot} · OP ${formData.op_order}`,
+  });
+
+  setStep("execute");
+};
+
 
   // Guardar Reporte
   const handleSaveReport = () => {
@@ -152,18 +169,33 @@ export default function InspectionModal({ product, onClose }) {
       measurements,
     };
 
-    startTransition(async () => {
-      try {
-        const res = await apiPostMeasurements(payload);
-        if (res?.ok) {
-          onClose(); // Cerrar modal al guardar con éxito
-        } else {
-          setModalMsg({ type: "err", text: res?.error || "Error al guardar el reporte." });
-        }
-      } catch {
-        setModalMsg({ type: "err", text: "Error de red/servidor al guardar." });
-      }
+startTransition(async () => {
+  try {
+    const res = await apiPostMeasurements(payload);
+    if (res?.ok) {
+      showToast({
+        variant: "success",
+        title: "Mediciones registradas",
+        message: `Se guardaron ${measurements.length} mediciones correctamente.`,
+      });
+      onClose();
+    } else {
+      setModalMsg({ type: "err", text: res?.error || "Error al guardar el reporte." });
+      showToast({
+        variant: "error",
+        title: "No se pudo guardar",
+        message: res?.error || "Error al guardar el reporte.",
+      });
+    }
+  } catch {
+    setModalMsg({ type: "err", text: "Error de red/servidor al guardar." });
+    showToast({
+      variant: "error",
+      title: "Error de red/servidor",
+      message: "No se pudo guardar. Intenta nuevamente.",
     });
+  }
+});
   };
 
   return (
@@ -228,7 +260,7 @@ export default function InspectionModal({ product, onClose }) {
                     label="Lote *"
                     value={formData.lot}
                     onChange={(e) => handleInputChange("lot", e.target.value)}
-                    placeholder="Ej. 2024-05-A"
+                    placeholder="Ej. 251201"
                     autoFocus
                     required
                   />
@@ -236,14 +268,13 @@ export default function InspectionModal({ product, onClose }) {
                     label="Orden de Producción (O.P.) *"
                     value={formData.op_order}
                     onChange={(e) => handleInputChange("op_order", e.target.value)}
-                    placeholder="Ej. OP-99821"
-                    required
+                    placeholder="Opcional"
                   />
                   <InputGroup
                     label="Color"
                     value={formData.color}
                     onChange={(e) => handleInputChange("color", e.target.value)}
-                    placeholder="Ej. Azul Estándar"
+                    placeholder="Ej. Azul Electrico"
                   />
                 </div>
               </section>
@@ -269,9 +300,8 @@ export default function InspectionModal({ product, onClose }) {
                       Turno
                     </label>
                     <Select value={formData.shift} onChange={(e) => handleInputChange("shift", e.target.value)}>
-                      <option value="A">Turno A</option>
-                      <option value="B">Turno B</option>
-                      <option value="C">Turno C</option>
+                      <option value="T1">Turno 1</option>
+                      <option value="2">Turno 2</option>
                     </Select>
                   </div>
                   <InputGroup
