@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useTransition, useMemo } from "react";
-import { apiDimensions, apiPostMeasurements } from "@/app/actions/metrologia";
+import { useState, useEffect, useTransition, useMemo, useRef } from "react";
+import Image from "next/image"; 
+import { apiDimensions, apiPostMeasurements, apiColors } from "@/app/actions/metrologia";
 import { cn, toNumberOrNull, calcMinMax } from "@/lib/utils";
 
 // Componentes UI
@@ -14,17 +15,35 @@ import { Icons } from "@/components/ui/Icons";
 import IndustrialGraph from "./IndustrialGraph";
 import { useToast } from "@/components/ui/ToastProvider";
 
+// --- CONFIGURACIÓN MANUAL DE PLANOS ---
+const BLUEPRINT_MAP = {
+  "PP-047": "plano_steripod.png",   
+  "ID-002": "plano_steripod.png",
+  "ID-003": "plano_steripod.png",
+  "ID-004": "plano_steripod.png",
+  "ID-005": "plano_steripod.png",
+  "ID-006": "plano_steripod.png",
+  "ID-007": "plano_steripod.png",
+  "ID-008": "plano_steripod.png",
+  "ID-009": "plano_tapaclip.png",
+  // Asegúrate de que estos IDs coincidan con los de tu HUB
+};
 
 export default function InspectionModal({ product, onClose }) {
-  const [step, setStep] = useState("setup"); // setup | execute
+  const [step, setStep] = useState("setup");
   const [isPending, startTransition] = useTransition();
-
-  // Mensajería interna
   const [modalMsg, setModalMsg] = useState({ type: "", text: "" });
 
-  // Estado del Formulario Completo (TODOS LOS CAMPOS RECUPERADOS)
+  // Estado para la lista de colores
+  const [colorsList, setColorsList] = useState([]);
+
+  // Refs para scroll
+  const inputRefs = useRef({});
+
+  // Formulario
   const [formData, setFormData] = useState({
     lot: "",
+    manufacturing_date: new Date().toISOString().split('T')[0],
     op_order: "",
     color: "",
     machine: "",
@@ -36,118 +55,128 @@ export default function InspectionModal({ product, onClose }) {
 
   const { showToast } = useToast();
 
-  // Configuración fija por ahora
+  // Configuración de cavidades
   const piecesPerCavity = 1;
-
-  // Estado de Cavidades
-  const totalCavities = Number(product?.cavities || 1);
+  const totalCavities = Number(product?.cavities || 1); 
+  
   const allCavityIds = useMemo(
     () => Array.from({ length: totalCavities }, (_, i) => i + 1),
     [totalCavities]
   );
+  
   const [selectedCavities, setSelectedCavities] = useState(allCavityIds);
-
-  // Datos de Medición
   const [dims, setDims] = useState([]);
   const [vals, setVals] = useState({});
 
-  // Cargar Dimensiones al abrir
+  // Detección de plano
+  const blueprintFile = BLUEPRINT_MAP[product.id];
+  const hasBlueprint = !!blueprintFile;
+
+  // --- CARGA DE DATOS ---
   useEffect(() => {
     let alive = true;
     startTransition(async () => {
       setModalMsg({ type: "", text: "" });
       try {
-        const res = await apiDimensions(product.id);
+        const [dimRes, colorRes] = await Promise.all([
+            apiDimensions(product.id),
+            apiColors()
+        ]);
+
         if (!alive) return;
-        if (res?.ok) setDims(Array.isArray(res.data) ? res.data : []);
+
+        // 1. Dimensiones
+        if (dimRes?.ok) setDims(Array.isArray(dimRes.data) ? dimRes.data : []);
         else {
           setDims([]);
-          setModalMsg({ type: "err", text: res?.error || "Error cargando dimensiones." });
+          setModalMsg({ type: "err", text: dimRes?.error || "Error cargando dimensiones." });
         }
+
+        // 2. Colores (Sin filtrar duplicados, los queremos todos)
+        if (colorRes?.ok && Array.isArray(colorRes.data)) {
+            const sortedList = colorRes.data.sort((a, b) => a.name.localeCompare(b.name));
+            setColorsList(sortedList);
+        }
+
       } catch {
         if (!alive) return;
         setDims([]);
-        setModalMsg({ type: "err", text: "Error cargando dimensiones." });
+        setModalMsg({ type: "err", text: "Error de conexión inicial." });
       }
     });
     return () => { alive = false; };
   }, [product.id]);
 
-  // Manejadores de Formulario
-  const handleInputChange = (field, value) => {
-    setFormData((prev) => ({ ...prev, [field]: value }));
-  };
-
-  const toggleCavity = (cavId) => {
-    setSelectedCavities((prev) =>
-      prev.includes(cavId)
-        ? prev.filter((id) => id !== cavId)
-        : [...prev, cavId].sort((a, b) => a - b)
-    );
-  };
-
-  const selectAllCavities = () => setSelectedCavities(allCavityIds);
-  const deselectAllCavities = () => setSelectedCavities([]);
-
-  // Validar antes de pasar a medir
-const handleStartExecution = () => {
-  setModalMsg({ type: "", text: "" });
-
-  if (!formData.lot || !formData.op_order || !formData.operator || selectedCavities.length === 0) {
-    setModalMsg({
-      type: "err",
-      text: "Complete obligatorios: Lote, O.P., Operador y seleccione cavidades.",
-    });
-    showToast({
-      variant: "error",
-      title: "Faltan datos",
-      message: "Completa Lote, O.P., Operador y selecciona cavidades.",
-    });
-    return;
-  }
-
-  if (!dims.length) {
-    setModalMsg({ type: "err", text: "No hay dimensiones cargadas para esta referencia." });
-    showToast({
-      variant: "error",
-      title: "Sin dimensiones",
-      message: "Esta referencia no tiene variables configuradas.",
-    });
-    return;
-  }
-
-  showToast({
-    variant: "success",
-    title: "Muestra registrada",
-    message: `Lote ${formData.lot} · OP ${formData.op_order}`,
+  // Helpers
+  const handleInputChange = (f, v) => setFormData(p => ({ ...p, [f]: v }));
+  
+  const sortCavities = (list) => list.sort((a, b) => {
+      const isNumA = typeof a === "number";
+      const isNumB = typeof b === "number";
+      if (isNumA && isNumB) return a - b;
+      if (isNumA) return -1;
+      if (isNumB) return 1;
+      return String(a).localeCompare(String(b), undefined, { numeric: true });
   });
 
-  setStep("execute");
-};
+  const toggleCavity = (id) => setSelectedCavities(p => {
+      const exists = p.includes(id);
+      const next = exists ? p.filter(x => x !== id) : [...p, id];
+      return sortCavities(next);
+  });
 
+  const addUnknownCavity = () => setSelectedCavities(p => {
+      let c = 1; while (p.includes(`?${c}`)) c++;
+      return sortCavities([...p, `?${c}`]);
+  });
 
-  // Guardar Reporte
+  const removeUnknownCavity = (id) => setSelectedCavities(p => p.filter(x => x !== id));
+  
+  const selectAllCavities = () => setSelectedCavities(p => {
+      const u = p.filter(id => typeof id !== 'number');
+      return sortCavities([...allCavityIds, ...u]);
+  });
+  
+  const deselectAllCavities = () => setSelectedCavities([]);
+
+  // Validación
+  const handleStartExecution = () => {
+    setModalMsg({ type: "", text: "" });
+    if (!formData.lot || !formData.op_order || !formData.operator || !formData.color || selectedCavities.length === 0) {
+      showToast({ variant: "error", title: "Faltan datos", message: "Complete Lote, OP, Color, Operador y Cavidades." });
+      return;
+    }
+    if (!dims.length) {
+      setModalMsg({ type: "err", text: "Sin dimensiones configuradas." });
+      return;
+    }
+    setStep("execute");
+  };
+
+  // Guardar
   const handleSaveReport = () => {
     setModalMsg({ type: "", text: "" });
-
-    // Construir mediciones
     const measurements = [];
+
     for (const cav of selectedCavities) {
       for (let piece = 1; piece <= piecesPerCavity; piece++) {
         for (const d of dims) {
           const key = `${cav}|${piece}|${d.dimension_id}`;
           const num = toNumberOrNull(vals[key]);
+          const isIllegibleVal = vals[key] === "ILEGIBLE";
 
-          if (num === null) {
-            setModalMsg({ type: "err", text: `Falta valor: Cav ${cav} / ${d.desc}` });
-            return;
+          if (!isIllegibleVal && num === null) {
+             const refKey = `${cav}-${d.dimension_id}`;
+             inputRefs.current[refKey]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+             setModalMsg({ type: "err", text: `Falta valor: ${cav} / ${d.desc}` });
+             return;
           }
 
           measurements.push({
             cavity: cav,
             piece,
             dimension_id: d.dimension_id,
-            value: num,
+            value: isIllegibleVal ? "ILEGIBLE" : num,
             unit: d.unit || "mm",
           });
         }
@@ -157,322 +186,144 @@ const handleStartExecution = () => {
     const payload = {
       product_id: product.id,
       lot: formData.lot,
-      color: formData.color,             // RECUPERADO
+      fecha_fabricacion: formData.manufacturing_date,
+      color: formData.color,
       orden_produccion: formData.op_order,
-      maquina: formData.machine,         // RECUPERADO
-      turno: formData.shift,             // RECUPERADO
+      maquina: formData.machine,
+      turno: formData.shift,
       operador: formData.operator,
-      inspector: formData.inspector,     // RECUPERADO
-      equipment: formData.equipment,     // RECUPERADO
+      inspector: formData.inspector,
+      equipment: formData.equipment,
       pieces_per_cavity: piecesPerCavity,
       cavities: selectedCavities,
       measurements,
     };
 
-startTransition(async () => {
-  try {
-    const res = await apiPostMeasurements(payload);
-    if (res?.ok) {
-      showToast({
-        variant: "success",
-        title: "Mediciones registradas",
-        message: `Se guardaron ${measurements.length} mediciones correctamente.`,
-      });
-      onClose();
-    } else {
-      setModalMsg({ type: "err", text: res?.error || "Error al guardar el reporte." });
-      showToast({
-        variant: "error",
-        title: "No se pudo guardar",
-        message: res?.error || "Error al guardar el reporte.",
-      });
-    }
-  } catch {
-    setModalMsg({ type: "err", text: "Error de red/servidor al guardar." });
-    showToast({
-      variant: "error",
-      title: "Error de red/servidor",
-      message: "No se pudo guardar. Intenta nuevamente.",
+    startTransition(async () => {
+      try {
+        const res = await apiPostMeasurements(payload);
+        if (res?.ok) {
+          showToast({ variant: "success", title: "Guardado", message: `${measurements.length} datos registrados.` });
+          onClose();
+        } else {
+          setModalMsg({ type: "err", text: res?.error || "Error al guardar." });
+        }
+      } catch {
+        setModalMsg({ type: "err", text: "Error de conexión." });
+      }
     });
-  }
-});
   };
 
   return (
-    <div className="fixed inset-0 bg-[#1F2373]/20 backdrop-blur-sm z-50 flex items-center justify-center p-3 md:p-6 animate-in fade-in">
-      {/* Modal Container */}
-      <Card className="w-full h-[94vh] flex flex-col shadow-2xl relative bg-white border-slate-200 max-w-[1400px]">
+    <div className="fixed inset-0 bg-[#1F2373]/20 backdrop-blur-sm z-50 flex items-center justify-center p-2 md:p-4 animate-modal-overlay overflow-hidden">
+      <Card className={cn(
+          "w-full h-[96vh] flex flex-col shadow-2xl relative bg-white border-slate-200 animate-modal-content transition-all duration-500",
+          step === 'execute' && hasBlueprint ? "max-w-[95vw]" : "max-w-[1200px]"
+      )}>
         
         {/* HEADER */}
-        <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between shrink-0">
+        <div className="px-6 py-4 border-b bg-slate-50/50 flex justify-between shrink-0">
           <div>
-            <h2 className="text-lg font-bold text-[#1F2373] tracking-tight uppercase flex items-center gap-2">
+            <h2 className="text-lg font-bold text-[#1F2373] uppercase flex items-center gap-2">
               <Icons.Box className="w-5 h-5" /> {product.name}
             </h2>
-            <div className="flex items-center gap-2 mt-1 pl-7">
-              <Badge variant="blue">REF: {product.id}</Badge>
-              <span className="text-[10px] text-slate-500 font-mono uppercase">
-                Protocolo de Inspección
-              </span>
+            <div className="pl-7 mt-1 flex items-center gap-2">
+                <Badge variant="blue">REF: {product.id}</Badge>
+                {hasBlueprint && step === 'execute' && (
+                    <Badge variant="outline" className="text-xs bg-indigo-50 text-indigo-700 border-indigo-200">
+                        <Icons.Dashboard className="w-3 h-3 mr-1" /> Plano de Referencia
+                    </Badge>
+                )}
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="text-slate-400 hover:text-[#1F2373] transition-colors p-1 bg-white border border-slate-200 rounded-sm hover:bg-slate-50"
-          >
-            <Icons.Close className="w-5 h-5" />
-          </button>
+          <button onClick={onClose} className="text-slate-400 hover:text-[#1F2373] p-1 border rounded-sm"><Icons.Close className="w-5 h-5" /></button>
         </div>
 
-        {/* MENSAJES DE ERROR */}
+        {/* MENSAJES */}
         {modalMsg.text && (
-          <div className="px-6 py-2 border-b border-slate-100 bg-white">
-            <div
-              className={cn(
-                "inline-flex items-center gap-2 text-xs font-mono px-2 py-1 rounded-sm border",
-                modalMsg.type === "err"
-                  ? "bg-red-50 text-red-700 border-red-100"
-                  : "bg-green-50 text-green-700 border-green-100"
-              )}
-            >
-              <Icons.Alert className="w-4 h-4" />
-              {modalMsg.text}
+          <div className="px-6 py-2 border-b bg-white shrink-0">
+            <div className={cn("inline-flex items-center gap-2 text-xs font-mono px-2 py-1 rounded-sm border",
+              modalMsg.type === "err" ? "bg-red-50 text-red-700 border-red-100" : "bg-green-50 text-green-700 border-green-100")}>
+              <Icons.Alert className="w-4 h-4" /> {modalMsg.text}
             </div>
           </div>
         )}
 
-        {/* CONTENIDO SCROLLABLE */}
-        <div className="flex-1 overflow-y-auto p-6 bg-[#F9FAFB]">
-          {step === "setup" ? (
-            /* --- PASO 1: CONFIGURACIÓN (TODOS LOS CAMPOS) --- */
-            <div className="max-w-4xl mx-auto space-y-8 animate-in slide-in-from-bottom-2">
-              
-              {/* Sección 1: Producción */}
-              <section className="space-y-4">
-                <div className="flex items-center gap-2 pb-2 border-b border-slate-200">
-                  <Icons.Settings className="w-4 h-4 text-[#1F2373]" />
-                  <h3 className="text-xs font-bold text-[#1F2373] uppercase tracking-widest">
-                    Datos de Producción
-                  </h3>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <InputGroup
-                    label="Lote *"
-                    value={formData.lot}
-                    onChange={(e) => handleInputChange("lot", e.target.value)}
-                    placeholder="Ej. 251201"
-                    autoFocus
-                    required
-                  />
-                  <InputGroup
-                    label="Orden de Producción (O.P.) *"
-                    value={formData.op_order}
-                    onChange={(e) => handleInputChange("op_order", e.target.value)}
-                    placeholder="Opcional"
-                  />
-                  <InputGroup
-                    label="Color"
-                    value={formData.color}
-                    onChange={(e) => handleInputChange("color", e.target.value)}
-                    placeholder="Ej. Azul Electrico"
-                  />
-                </div>
-              </section>
-
-              {/* Sección 2: Contexto */}
-              <section className="space-y-4">
-                <div className="flex items-center gap-2 pb-2 border-b border-slate-200">
-                  <Icons.Dashboard className="w-4 h-4 text-[#1F2373]" />
-                  <h3 className="text-xs font-bold text-[#1F2373] uppercase tracking-widest">
-                    Contexto Operativo
-                  </h3>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                  <InputGroup
-                    label="Máquina"
-                    value={formData.machine}
-                    onChange={(e) => handleInputChange("machine", e.target.value)}
-                    placeholder="Ej. INY-04"
-                    className="md:col-span-1"
-                  />
-                  <div className="space-y-1 md:col-span-1">
-                    <label className="text-[10px] text-[#1F2373] font-bold tracking-widest uppercase ml-1">
-                      Turno
-                    </label>
-                    <Select value={formData.shift} onChange={(e) => handleInputChange("shift", e.target.value)}>
-                      <option value="T1">Turno 1</option>
-                      <option value="2">Turno 2</option>
-                    </Select>
-                  </div>
-                  <InputGroup
-                    label="Operador *"
-                    value={formData.operator}
-                    onChange={(e) => handleInputChange("operator", e.target.value)}
-                    placeholder="ID o Nombre"
-                    className="md:col-span-1"
-                    required
-                  />
-                  <InputGroup
-                    label="Inspector"
-                    value={formData.inspector}
-                    onChange={(e) => handleInputChange("inspector", e.target.value)}
-                    placeholder="Opcional"
-                    className="md:col-span-1"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <InputGroup
-                    label="Equipo de Medición"
-                    value={formData.equipment}
-                    onChange={(e) => handleInputChange("equipment", e.target.value)}
-                    placeholder="Ej. QM-Data 200"
-                  />
-                  <div className="space-y-1">
-                    <label className="text-[10px] text-[#1F2373] font-bold tracking-widest uppercase ml-1">
-                      Piezas por Cavidad
-                    </label>
-                    <Input value={String(piecesPerCavity)} disabled className="bg-slate-100 text-slate-500" />
-                  </div>
-                </div>
-              </section>
-
-              {/* Sección 3: Cavidades */}
-              <section className="space-y-4">
-                <div className="flex items-center justify-between pb-2 border-b border-slate-200">
-                  <div className="flex items-center gap-2">
-                    <Icons.Box className="w-4 h-4 text-[#1F2373]" />
-                    <h3 className="text-xs font-bold text-[#1F2373] uppercase tracking-widest">
-                      Selección de Cavidades
-                    </h3>
-                  </div>
-                  <div className="flex gap-2">
-                    <button onClick={selectAllCavities} className="text-[10px] text-[#1F2373] hover:underline font-bold">
-                      TODAS
-                    </button>
-                    <span className="text-slate-300">|</span>
-                    <button onClick={deselectAllCavities} className="text-[10px] text-slate-500 hover:text-[#1F2373] hover:underline font-bold">
-                      NINGUNA
-                    </button>
-                  </div>
-                </div>
-                <div className="bg-white p-4 rounded-sm border border-slate-200">
-                   <div className="flex flex-wrap gap-2">
-                    {allCavityIds.map((cavId) => {
-                      const isSelected = selectedCavities.includes(cavId);
-                      return (
-                        <button
-                          key={cavId}
-                          onClick={() => toggleCavity(cavId)}
-                          className={cn(
-                            "w-10 h-10 rounded-sm flex items-center justify-center font-bold font-mono text-sm transition-all border-2",
-                            isSelected
-                              ? "bg-[#1F2373] text-white border-[#1F2373] shadow-sm"
-                              : "bg-slate-50 text-slate-400 border-slate-200 hover:border-[#1F2373]/50 hover:text-[#1F2373]"
-                          )}
-                        >
-                          {cavId}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </section>
-
-              <div className="pt-6 border-t border-slate-200 flex justify-end">
-                <Button onClick={handleStartExecution} className="px-8 py-3" disabled={isPending}>
-                  Continuar a Medición <Icons.Ruler className="w-4 h-4 ml-2" />
-                </Button>
-              </div>
-            </div>
-          ) : (
-            /* --- PASO 2: EJECUCIÓN (IGUAL QUE ANTES) --- */
-            <div className="space-y-6 animate-in fade-in">
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="text-xs font-bold text-[#1F2373] uppercase tracking-widest flex items-center gap-2">
-                  <Icons.Ruler className="w-4 h-4" /> Captura de Datos
-                </h3>
-                <Badge variant="green">EN PROCESO</Badge>
-              </div>
-
-              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-                {selectedCavities.map((cav) => (
-                  <Card key={cav} className="border-slate-200 shadow-sm overflow-hidden">
-                    <div className="bg-slate-50/80 px-4 py-3 border-b border-slate-200 flex justify-between items-center">
-                      <span className="text-sm font-bold text-[#1F2373] tracking-widest flex items-center gap-2">
-                        <span className="w-6 h-6 bg-[#1F2373] text-white rounded-sm flex items-center justify-center text-xs font-mono">
-                          {cav}
-                        </span>{" "}
-                        CAVIDAD
-                      </span>
+        {/* BODY */}
+        <div className="flex-1 overflow-hidden flex relative">
+          
+          {/* PASO 1: SETUP */}
+          {step === "setup" && (
+             <div className="flex-1 overflow-y-auto p-6 bg-[#F9FAFB]">
+                <div className="max-w-4xl mx-auto space-y-8 animate-in fade-in">
+                    <SetupForm 
+                        formData={formData} handleInputChange={handleInputChange} 
+                        piecesPerCavity={piecesPerCavity} allCavityIds={allCavityIds}
+                        selectedCavities={selectedCavities} toggleCavity={toggleCavity}
+                        selectAllCavities={selectAllCavities} deselectAllCavities={deselectAllCavities}
+                        addUnknownCavity={addUnknownCavity} removeUnknownCavity={removeUnknownCavity}
+                        colorsList={colorsList}
+                    />
+                     <div className="pt-6 border-t flex justify-end">
+                        <Button onClick={handleStartExecution} className="px-8 py-3" disabled={isPending}>
+                        Continuar <Icons.Ruler className="w-4 h-4 ml-2" />
+                        </Button>
                     </div>
+                </div>
+             </div>
+          )}
 
-                    <div className="p-4 space-y-4 bg-white">
-                      {dims.map((d) => {
-                        const key = `${cav}|1|${d.dimension_id}`;
-                        const nominal = toNumberOrNull(d.nominal);
-                        const { min, max } = calcMinMax(d.nominal, d.tol_sup, d.tol_inf);
-                        const currentVal = toNumberOrNull(vals[key]);
-                        const isBad = currentVal !== null && min !== null && max !== null && (currentVal < min || currentVal > max);
-
-                        return (
-                          <div key={d.dimension_id} className="grid grid-cols-[1fr_110px] gap-4 items-center group">
-                            <div>
-                              <div className="flex justify-between text-xs mb-1.5">
-                                <span className="text-[#1F2373] font-bold truncate pr-2">
-                                  {d.desc}
-                                </span>
-                                <span className="text-slate-500 font-mono bg-slate-100 px-1.5 rounded-sm">
-                                  {nominal !== null ? nominal : d.nominal}
-                                </span>
-                              </div>
-                              <IndustrialGraph
-                                val={vals[key] ?? ""}
-                                min={min}
-                                max={max}
-                                nominal={nominal ?? 0}
-                              />
+          {/* PASO 2: EXECUTE */}
+          {step === "execute" && (
+            <div className={cn(
+                "flex-1 w-full h-full",
+                hasBlueprint ? "grid grid-cols-1 lg:grid-cols-[40%_60%] divide-x divide-slate-200" : ""
+            )}>
+                {hasBlueprint && (
+                    <div className="hidden lg:flex flex-col h-full bg-slate-100/50 p-4 relative animate-in slide-in-from-left-4 duration-500">
+                        <div className="mb-3 flex justify-between items-center">
+                            <h3 className="text-xs font-bold text-[#1F2373] uppercase tracking-widest">Plano Mecánico</h3>
+                            <span className="text-[10px] text-slate-400 font-mono">{blueprintFile}</span>
+                        </div>
+                        <div className="flex-1 relative bg-white border border-slate-200 rounded-lg shadow-sm overflow-hidden flex items-center justify-center">
+                             <div className="relative w-full h-full p-2">
+                                <Image src={`/blueprints/${blueprintFile}`} alt="Plano" fill className="object-contain" />
+                             </div>
+                        </div>
+                        <div className="mt-2 text-center">
+                            <p className="text-[10px] text-slate-400">Referencia visual para la toma de medidas.</p>
+                        </div>
+                    </div>
+                )}
+                <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-[#F9FAFB] scroll-smooth">
+                    <div className="max-w-3xl mx-auto space-y-6 animate-in fade-in">
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-xs font-bold text-[#1F2373] uppercase tracking-widest flex items-center gap-2">
+                            <Icons.Ruler className="w-4 h-4" /> Captura de Datos
+                            </h3>
+                            <div className="text-right text-xs hidden sm:block font-mono">
+                                <span className="text-slate-500">Lote: <span className="text-[#1F2373] font-bold">{formData.lot}</span></span>
                             </div>
-                            <Input
-                              className={cn(
-                                "text-right font-mono text-lg py-1 h-10 font-bold tracking-wider",
-                                isBad ? "border-red-300 bg-red-50/40" : ""
-                              )}
-                              placeholder="-"
-                              inputMode="decimal"
-                              value={vals[key] || ""}
-                              onChange={(e) =>
-                                setVals((prev) => ({
-                                  ...prev,
-                                  [key]: e.target.value,
-                                }))
-                              }
-                            />
-                          </div>
-                        );
-                      })}
+                        </div>
+                        <div className="grid grid-cols-1 gap-6">
+                            {selectedCavities.map((cav) => (
+                                <CavityCard 
+                                    key={cav} cav={cav} dims={dims} vals={vals} setVals={setVals} 
+                                    inputRefs={inputRefs} 
+                                />
+                            ))}
+                        </div>
                     </div>
-                  </Card>
-                ))}
-              </div>
+                </div>
             </div>
           )}
         </div>
 
-        {/* FOOTER ACTIONS (Paso 2) */}
+        {/* FOOTER */}
         {step === "execute" && (
-          <div className="p-4 border-t border-slate-200 bg-slate-50 flex justify-between items-center">
-            <Button variant="outline" onClick={() => setStep("setup")} disabled={isPending}>
-              ← Atrás (Config)
-            </Button>
-            <div className="flex gap-4 items-center">
-               <div className="text-right text-xs hidden sm:block font-mono">
-                <span className="text-slate-500 block">Lote: <span className="text-[#1F2373] font-bold">{formData.lot}</span></span>
-              </div>
-              <Button onClick={handleSaveReport} disabled={isPending} className="shadow-md px-6">
-                {isPending ? "Guardando..." : "Finalizar Inspección"}
-              </Button>
-            </div>
+          <div className="p-4 border-t bg-slate-50 shrink-0 flex justify-between">
+            <Button variant="outline" onClick={() => setStep("setup")} disabled={isPending}>← Atrás</Button>
+            <Button onClick={handleSaveReport} disabled={isPending} className="px-6 shadow-md">{isPending ? "Guardando..." : "Finalizar"}</Button>
           </div>
         )}
       </Card>
@@ -480,12 +331,152 @@ startTransition(async () => {
   );
 }
 
-// Helper interno para agrupar Label + Input
+// --- SUBCOMPONENTES ---
+
+const SetupForm = ({ 
+    formData, handleInputChange, piecesPerCavity, allCavityIds, 
+    selectedCavities, toggleCavity, selectAllCavities, deselectAllCavities, 
+    addUnknownCavity, removeUnknownCavity, colorsList 
+}) => {
+    return (
+      <>
+        <section className="space-y-4">
+          <div className="flex items-center gap-2 pb-2 border-b border-slate-200">
+            <Icons.Settings className="w-4 h-4 text-[#1F2373]" />
+            <h3 className="text-xs font-bold text-[#1F2373] uppercase tracking-widest">Datos de Producción</h3>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <InputGroup label="Fecha Fabricación *" type="date" value={formData.manufacturing_date} onChange={(e) => handleInputChange("manufacturing_date", e.target.value)} required />
+            <InputGroup label="Lote *" value={formData.lot} onChange={(e) => handleInputChange("lot", e.target.value)} placeholder="Ej. 251201" autoFocus required />
+            <InputGroup label="O.P. *" value={formData.op_order} onChange={(e) => handleInputChange("op_order", e.target.value)} placeholder="Opcional" />
+            
+            {/* SELECTOR DE COLOR CORREGIDO Y BLINDADO */}
+            <div className="space-y-1">
+                <label className="text-[10px] text-[#1F2373] font-bold uppercase ml-1">Color *</label>
+                <Select 
+                    value={formData.color} 
+                    onChange={(e) => handleInputChange("color", e.target.value)}
+                    required
+                >
+                    <option value="">-- Seleccionar --</option>
+                    {colorsList && colorsList.length > 0 ? (
+                        colorsList.map((c) => {
+                            // GENERACIÓN DE NOMBRE ÚNICO:
+                            // Si tiene código: "AMARILLO [AMA-STD]"
+                            // Si no tiene código: "AMARILLO [C-001]" (Usamos ID)
+                            const suffix = c.code ? c.code : c.id;
+                            const label = `${c.name} [${suffix}]`;
+                            
+                            return (
+                                // Usamos c.id como KEY, que es 100% único en la BD.
+                                <option key={c.id} value={label}>
+                                    {label}
+                                </option>
+                            );
+                        })
+                    ) : (
+                        <option value="" disabled>Cargando colores...</option>
+                    )}
+                </Select>
+            </div>
+          </div>
+        </section>
+  
+        <section className="space-y-4">
+          <div className="flex items-center gap-2 pb-2 border-b border-slate-200">
+            <Icons.Dashboard className="w-4 h-4 text-[#1F2373]" />
+            <h3 className="text-xs font-bold text-[#1F2373] uppercase tracking-widest">Contexto Operativo</h3>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <InputGroup label="Máquina" value={formData.machine} onChange={(e) => handleInputChange("machine", e.target.value)} />
+            <div className="space-y-1 md:col-span-1">
+              <label className="text-[10px] text-[#1F2373] font-bold tracking-widest uppercase ml-1">Turno</label>
+              <Select value={formData.shift} onChange={(e) => handleInputChange("shift", e.target.value)}>
+                <option value="A">Turno A</option><option value="B">Turno B</option><option value="C">Turno C</option>
+              </Select>
+            </div>
+            <InputGroup label="Operador *" value={formData.operator} onChange={(e) => handleInputChange("operator", e.target.value)} required />
+            <InputGroup label="Inspector" value={formData.inspector} onChange={(e) => handleInputChange("inspector", e.target.value)} />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <InputGroup label="Equipo de Medición" value={formData.equipment} onChange={(e) => handleInputChange("equipment", e.target.value)} />
+            <div className="space-y-1"><label className="text-[10px] text-[#1F2373] font-bold tracking-widest uppercase ml-1">Piezas por Cavidad</label><Input value={String(piecesPerCavity)} disabled className="bg-slate-100 text-slate-500" /></div>
+          </div>
+        </section>
+  
+        <section className="space-y-4">
+          <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+            <div className="flex items-center gap-2"><Icons.Box className="w-4 h-4 text-[#1F2373]" /><h3 className="text-xs font-bold text-[#1F2373] uppercase tracking-widest">Selección de Cavidades</h3></div>
+            <div className="flex gap-2"><button onClick={selectAllCavities} className="text-[10px] text-[#1F2373] hover:underline font-bold">TODAS</button><span className="text-slate-300">|</span><button onClick={deselectAllCavities} className="text-[10px] text-slate-500 hover:text-[#1F2373] hover:underline font-bold">NINGUNA</button></div>
+          </div>
+          <div className="bg-white p-4 rounded-sm border border-slate-200 space-y-4">
+            <div className="flex flex-wrap gap-2">
+              {allCavityIds.map((cavId) => {
+                const isSelected = selectedCavities.includes(cavId);
+                return (<button key={cavId} onClick={() => toggleCavity(cavId)} className={cn("w-10 h-10 rounded-sm flex items-center justify-center font-bold font-mono text-sm transition-all border-2", isSelected ? "bg-[#1F2373] text-white border-[#1F2373] shadow-sm" : "bg-slate-50 text-slate-400 border-slate-200 hover:border-[#1F2373]/50 hover:text-[#1F2373]")}>{cavId}</button>);
+              })}
+            </div>
+            <div className="pt-3 border-t border-dashed border-slate-200"><div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center"><Button onClick={addUnknownCavity} variant="outline" className="border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 h-8 text-xs px-3"><Icons.Plus className="w-3 h-3 mr-2" />Agregar Muestra Ilegible</Button><span className="text-[10px] text-slate-400 italic">Usa esto si tienes piezas sin número visible.</span></div><div className="flex flex-wrap gap-2 mt-3">{selectedCavities.filter(c => typeof c !== 'number').map(unkId => (<div key={unkId} className="flex items-center bg-amber-100 border border-amber-200 text-amber-900 rounded-sm px-2 py-1 shadow-sm"><span className="font-mono font-bold text-xs mr-2">{unkId}</span><button onClick={() => removeUnknownCavity(unkId)} className="text-amber-700 hover:text-red-600"><Icons.Close className="w-3 h-3" /></button></div>))}</div></div>
+          </div>
+        </section>
+      </>
+    );
+};
+
+const CavityCard = ({ cav, dims, vals, setVals, inputRefs }) => {
+    const isUnknown = typeof cav !== 'number';
+    return (
+      <Card className={cn("border-slate-200 shadow-sm overflow-hidden", isUnknown && "border-amber-200 ring-2 ring-amber-50")}>
+        <div className={cn("px-4 py-3 border-b flex justify-between items-center", isUnknown ? "bg-amber-50/80 border-amber-100" : "bg-slate-50/80 border-slate-200")}>
+          <span className="text-sm font-bold text-[#1F2373] tracking-widest flex items-center gap-2">
+            <span className={cn("w-auto min-w-6 h-6 px-1.5 bg-[#1F2373] text-white rounded-sm flex items-center justify-center text-xs font-mono", isUnknown && "bg-amber-600")}>
+              {cav}
+            </span> {isUnknown ? "CAVIDAD DESC." : "CAVIDAD"}
+          </span>
+        </div>
+        <div className="p-4 space-y-4 bg-white">
+          {dims.map((d) => {
+            const key = `${cav}|1|${d.dimension_id}`;
+            const refKey = `${cav}-${d.dimension_id}`; 
+            const rawVal = vals[key];
+            const isIllegibleVal = rawVal === "ILEGIBLE";
+            const valNum = toNumberOrNull(rawVal);
+            const { min, max } = calcMinMax(d.nominal, d.tol_sup, d.tol_inf);
+            const isBad = !isIllegibleVal && valNum !== null && (valNum < min || valNum > max);
+  
+            return (
+              <div key={d.dimension_id} ref={el => inputRefs.current[refKey] = el} className="grid grid-cols-[1fr_110px_auto] gap-3 items-center group">
+                <div>
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="font-bold text-[#1F2373] truncate">{d.desc}</span>
+                    <span className="text-slate-500 font-mono bg-slate-100 px-1 rounded">{d.nominal}</span>
+                  </div>
+                  <IndustrialGraph val={isIllegibleVal ? "" : (rawVal??"")} min={min} max={max} nominal={toNumberOrNull(d.nominal)||0} />
+                </div>
+                <Input 
+                  className={cn("text-right font-mono text-lg font-bold h-10", isBad && "bg-red-50 border-red-300", isIllegibleVal && "bg-slate-100 text-slate-400 text-sm italic")}
+                  placeholder="-"
+                  type={isIllegibleVal ? "text" : "number"}
+                  inputMode={isIllegibleVal ? "text" : "decimal"}
+                  disabled={isIllegibleVal}
+                  value={isIllegibleVal ? "ILEGIBLE" : (rawVal || "")}
+                  onChange={(e) => setVals(p => ({ ...p, [key]: e.target.value }))}
+                />
+                <div className="flex flex-col items-center justify-center pt-4">
+                  <input type="checkbox" className="w-4 h-4 rounded text-[#1F2373]" checked={isIllegibleVal} onChange={(e) => setVals(p => ({ ...p, [key]: e.target.checked ? "ILEGIBLE" : "" }))} />
+                  <span className="text-[9px] text-slate-400">N/A</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+    );
+};
+
 const InputGroup = ({ label, required, className, ...props }) => (
   <div className={cn("space-y-1", className)}>
-    <label className="text-[10px] text-[#1F2373] font-bold tracking-widest uppercase ml-1">
-      {label} {required && <span className="text-red-500">*</span>}
-    </label>
-    <Input {...props} required={!!required} />
+    <label className="text-[10px] text-[#1F2373] font-bold uppercase ml-1">{label} {required && "*"}</label>
+    <Input {...props} required={required} />
   </div>
 );

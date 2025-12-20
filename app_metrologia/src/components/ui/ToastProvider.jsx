@@ -38,7 +38,7 @@ export function ToastProvider({ children }) {
       {children}
 
       {/* Toast stack */}
-      <div className="fixed top-4 right-4 z-[9999] w-[360px] max-w-[calc(100vw-2rem)] space-y-2">
+      <div className="fixed top-4 right-4 z-9999 w-90 max-w-[calc(100vw-2rem)] space-y-2">
         {toasts.map((t) => {
           const style =
             t.variant === "success"

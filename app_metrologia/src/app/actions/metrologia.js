@@ -1,6 +1,7 @@
 "use server";
 
 import "server-only";
+import { SCRIPT_ROUTES } from "@/lib/config"; // <--- 1. Importamos las rutas centralizadas
 
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL || "";
 const APPS_SCRIPT_INTERNAL_KEY = process.env.APPS_SCRIPT_INTERNAL_KEY || "";
@@ -24,7 +25,6 @@ async function fetchAppsScript_(params = {}, options = {}) {
 
   const resp = await fetch(url.toString(), {
     redirect: "follow",
-    // Quitamos "no-store" por defecto para permitir caché personalizada
     ...options
   });
 
@@ -32,21 +32,45 @@ async function fetchAppsScript_(params = {}, options = {}) {
   try {
     return JSON.parse(text);
   } catch (_) {
-    return { ok: false, error: `Error Apps Script: ${text.slice(0, 100)}...` };
+    // Si falla el parseo, devolvemos un error controlado en lugar de lanzar excepción
+    return { ok: false, error: `Error Apps Script (Posible HTML o Timeout): ${text.slice(0, 100)}...` };
   }
 }
 
 /* ==================================================================================
-   API ACTIONS CON CACHÉ (VELOCIDAD EXTREMA)
+   HELPERS DE NORMALIZACIÓN DE DATOS
    ================================================================================== */
 
-// 1. PRODUCTOS: Catálogo estático. 
-// Se guarda en caché por 1 hora (3600 segundos).
+// 2. Función para limpiar datos sucios del Sheet antes de enviarlos al Frontend
+function normalizeMeasurement(m) {
+  if (!m) return null;
+  
+  // Lógica unificada para encontrar la cavidad
+  const rawCavity = m.cavity ?? m.cavidad ?? m.muestreo?.cavity ?? (Array.isArray(m.cavities) ? m.cavities[0] : null);
+
+  return {
+    ...m,
+    // Estandarizamos siempre a "cavity" como string
+    cavity: rawCavity !== null && rawCavity !== undefined ? String(rawCavity) : "N/A",
+    // Aseguramos que el valor sea numérico
+    value: Number(m.value ?? m.valor ?? 0),
+    // Normalizamos fecha si existe
+    timestamp: m.timestamp ?? m.fecha ?? null,
+    // Preservamos el ID o generamos uno si falta (útil para keys de React)
+    id: m.id ?? `${m.lot}-${rawCavity}-${Math.random().toString(36).slice(2)}`
+  };
+}
+
+/* ==================================================================================
+   API ACTIONS CON CACHÉ
+   ================================================================================== */
+
+// 1. PRODUCTOS
 export async function apiProducts() {
   try {
     const out = await fetchAppsScript_(
-      { r: "products" },
-      { next: { revalidate: 3600 } } // <--- ¡AQUÍ ESTÁ EL TRUCO!
+      { r: SCRIPT_ROUTES.PRODUCTS }, // Uso de constante
+      { next: { revalidate: 3600 } }
     );
     return out;
   } catch (e) {
@@ -54,13 +78,12 @@ export async function apiProducts() {
   }
 }
 
-// 2. DIMENSIONES: Especificaciones técnicas.
-// Se guarda en caché por 1 hora. Al abrir el modal será instantáneo la segunda vez.
+// 2. DIMENSIONES
 export async function apiDimensions(product_id) {
   try {
     const out = await fetchAppsScript_(
-      { r: "dimensions", product_id },
-      { next: { revalidate: 3600 } } // <--- CACHÉ DE 1 HORA
+      { r: SCRIPT_ROUTES.DIMENSIONS, product_id }, // Uso de constante
+      { next: { revalidate: 3600 } }
     );
     return out;
   } catch (e) {
@@ -68,14 +91,11 @@ export async function apiDimensions(product_id) {
   }
 }
 
-// 3. HISTORIAL: Datos analíticos.
-// Se guarda por 5 minutos (300s). Suficiente para navegar rápido sin datos viejos.
+// 3. HISTORIAL (Con Normalización)
 export async function apiHistory(filters = {}) {
   try {
-    // Generamos una "key" única para el caché basada en los filtros
-    // (Next.js lo hace automático por URL, pero esto ayuda a entenderlo)
-    const out = await fetchAppsScript_({
-      r: "history",
+    const rawData = await fetchAppsScript_({
+      r: SCRIPT_ROUTES.HISTORY, // Uso de constante
       product_id: filters.product_id || "",
       lot: filters.lot || "",
       cavity: filters.cavity ?? "",
@@ -83,26 +103,53 @@ export async function apiHistory(filters = {}) {
       to: filters.to || "",
       limit: filters.limit ?? 200
     }, { 
-      next: { revalidate: 300 } // <--- CACHÉ DE 5 MINUTOS
+      next: { revalidate: 300 } 
     });
+
+    // 3. Aplicar normalización a la respuesta
+    // Caso A: La respuesta es un array directo de mediciones
+    if (Array.isArray(rawData)) {
+      return rawData.map(normalizeMeasurement);
+    } 
+    // Caso B: La respuesta es un objeto { ok: true, data: [...] } (común en APIs estructuradas)
+    else if (rawData?.data && Array.isArray(rawData.data)) {
+      return { 
+        ...rawData, 
+        data: rawData.data.map(normalizeMeasurement) 
+      };
+    }
+
+    // Si hubo error o formato desconocido, devolvemos tal cual
+    return rawData;
+
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+// 4. GUARDAR MEDICIÓN
+export async function apiPostMeasurements(payload) {
+  try {
+    const out = await fetchAppsScript_(
+      { r: SCRIPT_ROUTES.MEASUREMENTS }, // Uso de constante
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        cache: "no-store"
+      }
+    );
     return out;
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
   }
 }
 
-// 4. GUARDAR MEDICIÓN: Siempre en vivo.
-// Los POST no se cachean por seguridad e integridad.
-export async function apiPostMeasurements(payload) {
+export async function apiColors() {
   try {
     const out = await fetchAppsScript_(
-      { r: "measurements" },
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        cache: "no-store" // <--- IMPORTANTE: Nunca cachear escrituras
-      }
+      { r: SCRIPT_ROUTES.COLORS }, // Usa la constante nueva
+      { next: { revalidate: 3600 } } // Cache de 1 hora está bien para colores
     );
     return out;
   } catch (e) {

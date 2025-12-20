@@ -21,29 +21,10 @@ function pickCavity(m) {
 }
 
 export default function QualityDashboard({ stats, data, rawMeasurements }) {
-  if (!stats) return <div className="p-4 text-slate-400">Esperando datos...</div>;
-
-  const n = Number(stats.n ?? 0);
-
-  // Estado (sin mentir con n bajo)
-  const enoughSample = n >= 25;
-  const capable = Number(stats.cpk) >= 1.33;
-
-  const status = !enoughSample
-    ? { label: "MUESTRA INSUFICIENTE", dot: "bg-amber-500", pill: "bg-amber-50 border-amber-100", text: "text-amber-700" }
-    : capable
-    ? { label: "PROCESO ESTABLE", dot: "bg-emerald-500", pill: "bg-emerald-50 border-emerald-100", text: "text-emerald-700" }
-    : { label: "REVISAR PROCESO", dot: "bg-rose-500", pill: "bg-rose-50 border-rose-100", text: "text-rose-700" };
-
-  const cpk = Number(stats.cpk ?? 0);
-  const cpkColor = cpk >= 1.33 ? "text-emerald-600" : cpk >= 1.0 ? "text-amber-500" : "text-rose-600";
-
-  const lot = rawMeasurements?.[0]?.muestreo?.lot || rawMeasurements?.[0]?.lot || "---";
-
-  // ---------- NUEVO: selección de cavidad + modal ----------
+  // 1. HOOKS PRIMERO
   const [selectedCavity, setSelectedCavity] = useState(null);
 
-  // Cerrar con ESC
+  // Effects
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === "Escape") setSelectedCavity(null);
@@ -52,7 +33,6 @@ export default function QualityDashboard({ stats, data, rawMeasurements }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // (Opcional) bloquear scroll cuando el modal está abierto
   useEffect(() => {
     if (!selectedCavity) return;
     const prev = document.body.style.overflow;
@@ -62,8 +42,17 @@ export default function QualityDashboard({ stats, data, rawMeasurements }) {
     };
   }, [selectedCavity]);
 
+  // Extraemos valores primitivos para usarlos en las dependencias
+  // (Usamos 'undefined' como fallback para saber si no existen)
+  const statsMean = stats?.mean;
+  const statsLsl = stats?.lsl;
+  const statsUsl = stats?.usl;
+  const statsSigma = stats?.sigma;
+
   // Promedio por cavidad
   const cavityRows = useMemo(() => {
+    if (!stats) return { rows: [], hasCavities: false };
+
     const arr = Array.isArray(rawMeasurements) ? rawMeasurements : [];
     const groups = new Map();
 
@@ -77,17 +66,35 @@ export default function QualityDashboard({ stats, data, rawMeasurements }) {
       groups.get(key).push(v);
     }
 
-    const cavities = Array.from(groups.keys()).sort((a, b) => Number(a) - Number(b));
+    const cavities = Array.from(groups.keys()).sort((a, b) => {
+  const nA = Number(a);
+  const nB = Number(b);
+  const isNumA = Number.isFinite(nA);
+  const isNumB = Number.isFinite(nB);
+
+  // 1. Si ambos son números, orden numérico normal
+  if (isNumA && isNumB) return nA - nB;
+
+  // 2. Si uno es número y el otro texto, ponemos los números primero
+  if (isNumA) return -1;
+  if (isNumB) return 1;
+
+  // 3. Si ambos son texto (ej. "ILEGIBLE" vs "N/A"), orden alfabético
+  return String(a).localeCompare(String(b));
+});
     const rows = cavities.map((c) => {
       const vals = groups.get(c);
       const nn = vals.length;
       const mean = vals.reduce((s, x) => s + x, 0) / nn;
       const min = Math.min(...vals);
       const max = Math.max(...vals);
-      const delta = Number.isFinite(stats.mean) ? mean - stats.mean : 0;
+      
+      // CORRECCIÓN: Usamos statsMean en lugar de stats.mean
+      const delta = Number.isFinite(statsMean) ? mean - statsMean : 0;
 
-      const lsl = Number.isFinite(stats.lsl) ? stats.lsl : null;
-      const usl = Number.isFinite(stats.usl) ? stats.usl : null;
+      // CORRECCIÓN: Usamos statsLsl y statsUsl
+      const lsl = Number.isFinite(statsLsl) ? statsLsl : null;
+      const usl = Number.isFinite(statsUsl) ? statsUsl : null;
 
       const out = (lsl !== null && mean < lsl) || (usl !== null && mean > usl);
 
@@ -95,11 +102,12 @@ export default function QualityDashboard({ stats, data, rawMeasurements }) {
     });
 
     return { rows, hasCavities: rows.length > 0 };
-  }, [rawMeasurements, stats.mean, stats.lsl, stats.usl]);
+  }, [rawMeasurements, stats, statsMean, statsLsl, statsUsl]); 
+  // Ahora sí las usamos dentro, así que ESLint estará feliz.
 
-  // ---------- NUEVO: reporte filtrado por cavidad ----------
+  // Reporte filtrado por cavidad
   const cavityReport = useMemo(() => {
-    if (!selectedCavity) return null;
+    if (!selectedCavity || !stats) return null;
 
     const arr = Array.isArray(rawMeasurements) ? rawMeasurements : [];
     const filtered = arr.filter((m) => String(pickCavity(m)) === String(selectedCavity));
@@ -113,8 +121,9 @@ export default function QualityDashboard({ stats, data, rawMeasurements }) {
     const min = nn ? Math.min(...values) : null;
     const max = nn ? Math.max(...values) : null;
 
-    const lsl = Number.isFinite(stats?.lsl) ? stats.lsl : null;
-    const usl = Number.isFinite(stats?.usl) ? stats.usl : null;
+    // CORRECCIÓN: Usamos las variables extraídas
+    const lsl = Number.isFinite(statsLsl) ? statsLsl : null;
+    const usl = Number.isFinite(statsUsl) ? statsUsl : null;
 
     const outCount =
       nn && (lsl !== null || usl !== null)
@@ -122,7 +131,24 @@ export default function QualityDashboard({ stats, data, rawMeasurements }) {
         : 0;
 
     return { filtered, values, n: nn, mean, min, max, outCount, lsl, usl };
-  }, [selectedCavity, rawMeasurements, stats?.lsl, stats?.usl]);
+  }, [selectedCavity, rawMeasurements, stats, statsLsl, statsUsl]);
+
+  // 2. RETURN CONDICIONAL
+  if (!stats) return <div className="p-4 text-slate-400">Esperando datos...</div>;
+
+  // 3. Variables derivadas
+  const n = Number(stats.n ?? 0);
+  const enoughSample = n >= 25;
+  const capable = Number(stats.cpk) >= 1.33;
+
+  const status = !enoughSample
+    ? { label: "MUESTRA INSUFICIENTE", dot: "bg-amber-500", pill: "bg-amber-50 border-amber-100", text: "text-amber-700" }
+    : capable
+    ? { label: "PROCESO ESTABLE", dot: "bg-emerald-500", pill: "bg-emerald-50 border-emerald-100", text: "text-emerald-700" }
+    : { label: "REVISAR PROCESO", dot: "bg-rose-500", pill: "bg-rose-50 border-rose-100", text: "text-rose-700" };
+
+  const cpk = Number(stats.cpk ?? 0);
+  const cpkColor = cpk >= 1.33 ? "text-emerald-600" : cpk >= 1.0 ? "text-amber-500" : "text-rose-600";
 
   return (
     <div className="font-sans space-y-4">
@@ -139,11 +165,11 @@ export default function QualityDashboard({ stats, data, rawMeasurements }) {
         </div>
       </div>
 
-      {/* LAYOUT PRINCIPAL: métricas | run chart | promedio por cavidad */}
+      {/* LAYOUT PRINCIPAL */}
       <div className="grid grid-cols-12 gap-4 items-stretch">
         {/* MÉTRICAS (izquierda) */}
         <div className="col-span-12 lg:col-span-3 space-y-4">
-          <BentoCard title="Cpk (Capacidad)" icon={<Target size={16} />} className="min-h-[180px]">
+          <BentoCard title="Cpk (Capacidad)" icon={<Target size={16} />} className="min-h-45">
             <div className="flex flex-col items-center justify-center h-full">
               <div className={`text-5xl font-bold ${cpkColor}`}>
                 {Number.isFinite(cpk) ? cpk.toFixed(2) : "--"}
@@ -154,10 +180,10 @@ export default function QualityDashboard({ stats, data, rawMeasurements }) {
             </div>
           </BentoCard>
 
-          <BentoCard title="Resumen" icon={<Activity size={16} />} className="min-h-[240px]">
+          <BentoCard title="Resumen" icon={<Activity size={16} />} className="min-h-60">
             <div className="space-y-3">
-              <RowMetric label="Media" value={Number(stats.mean).toFixed(3)} />
-              <RowMetric label="Sigma" value={Number(stats.sigma).toFixed(4)} />
+              <RowMetric label="Media" value={Number(statsMean).toFixed(3)} />
+              <RowMetric label="Sigma" value={Number(statsSigma).toFixed(4)} />
               <RowMetric label="Muestras" value={String(n)} sub="piezas" />
               <div className="pt-2">
                 <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
@@ -178,16 +204,16 @@ export default function QualityDashboard({ stats, data, rawMeasurements }) {
         <BentoCard
           title="Run Chart (Tendencia)"
           icon={<TrendingUp size={16} />}
-          className="col-span-12 lg:col-span-6 min-h-[440px]"
+          className="col-span-12 lg:col-span-6 min-h-110"
         >
           <RunChart data={data} stats={stats} />
         </BentoCard>
 
         {/* PROMEDIO POR CAVIDAD (derecha) */}
         <BentoCard
-          title="Promedio por cavidad"
+          title="Resultados por Cavidad"
           icon={<Layers size={16} />}
-          className="col-span-12 lg:col-span-3 min-h-[440px] overflow-hidden"
+          className="col-span-12 lg:col-span-3 min-h-110 overflow-hidden"
         >
           {!cavityRows.hasCavities ? (
             <div className="text-slate-400 text-sm">
@@ -206,7 +232,7 @@ export default function QualityDashboard({ stats, data, rawMeasurements }) {
                   : "bg-slate-50 border-slate-100 text-slate-700";
 
                 const deltaColor =
-                  Math.abs(r.delta) >= Number(stats.sigma || 0) * 2 ? "text-amber-600" : "text-slate-400";
+                  Math.abs(r.delta) >= Number(statsSigma || 0) * 2 ? "text-amber-600" : "text-slate-400";
 
                 return (
                   <div
@@ -270,8 +296,6 @@ function CavityReportModal({ cavity, report, statsOverall, onClose }) {
   const delta =
     Number.isFinite(report.mean) && Number.isFinite(statsOverall?.mean) ? report.mean - statsOverall.mean : null;
 
-  const okRate = report.n > 0 ? (((report.n - report.outCount) / report.n) * 100).toFixed(1) : "0.0";
-
   return (
     <div className="fixed inset-0 z-50">
       {/* Backdrop */}
@@ -330,7 +354,7 @@ function CavityReportModal({ cavity, report, statsOverall, onClose }) {
 
             {/* Run chart cavidad */}
             <div className="col-span-12 md:col-span-8">
-              <div className="p-4 rounded-2xl border border-slate-200 h-[260px]">
+              <div className="p-4 rounded-2xl border border-slate-200 h-65">
                 <RunChart data={report.filtered} stats={statsOverall} />
               </div>
             </div>
@@ -342,7 +366,7 @@ function CavityReportModal({ cavity, report, statsOverall, onClose }) {
                   Mediciones de la cavidad
                 </div>
 
-                <div className="max-h-[260px] overflow-auto pr-1 custom-scrollbar">
+                <div className="max-h-65 overflow-auto pr-1 custom-scrollbar">
                   <table className="w-full text-sm">
                     <thead className="text-[10px] uppercase tracking-widest text-slate-400">
                       <tr className="border-b border-slate-200">
