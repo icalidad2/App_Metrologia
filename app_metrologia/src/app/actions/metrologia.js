@@ -1,7 +1,7 @@
 "use server";
 
 import "server-only";
-import { SCRIPT_ROUTES } from "@/lib/config"; // <--- 1. Importamos las rutas centralizadas
+import { SCRIPT_ROUTES } from "@/lib/config";
 
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL || "";
 const APPS_SCRIPT_INTERNAL_KEY = process.env.APPS_SCRIPT_INTERNAL_KEY || "";
@@ -32,7 +32,6 @@ async function fetchAppsScript_(params = {}, options = {}) {
   try {
     return JSON.parse(text);
   } catch (_) {
-    // Si falla el parseo, devolvemos un error controlado en lugar de lanzar excepción
     return { ok: false, error: `Error Apps Script (Posible HTML o Timeout): ${text.slice(0, 100)}...` };
   }
 }
@@ -41,35 +40,28 @@ async function fetchAppsScript_(params = {}, options = {}) {
    HELPERS DE NORMALIZACIÓN DE DATOS
    ================================================================================== */
 
-// 2. Función para limpiar datos sucios del Sheet antes de enviarlos al Frontend
 function normalizeMeasurement(m) {
   if (!m) return null;
-  
-  // Lógica unificada para encontrar la cavidad
   const rawCavity = m.cavity ?? m.cavidad ?? m.muestreo?.cavity ?? (Array.isArray(m.cavities) ? m.cavities[0] : null);
 
   return {
     ...m,
-    // Estandarizamos siempre a "cavity" como string
     cavity: rawCavity !== null && rawCavity !== undefined ? String(rawCavity) : "N/A",
-    // Aseguramos que el valor sea numérico
     value: Number(m.value ?? m.valor ?? 0),
-    // Normalizamos fecha si existe
     timestamp: m.timestamp ?? m.fecha ?? null,
-    // Preservamos el ID o generamos uno si falta (útil para keys de React)
     id: m.id ?? `${m.lot}-${rawCavity}-${Math.random().toString(36).slice(2)}`
   };
 }
 
 /* ==================================================================================
-   API ACTIONS CON CACHÉ
+   API ACTIONS: METROLOGÍA BÁSICA
    ================================================================================== */
 
-// 1. PRODUCTOS
+// 1. PRODUCTOS (Respuesta completa para manejo de errores manual)
 export async function apiProducts() {
   try {
     const out = await fetchAppsScript_(
-      { r: SCRIPT_ROUTES.PRODUCTS }, // Uso de constante
+      { r: SCRIPT_ROUTES.PRODUCTS },
       { next: { revalidate: 3600 } }
     );
     return out;
@@ -78,11 +70,26 @@ export async function apiProducts() {
   }
 }
 
+// ✅ 1.1 PRODUCTOS (Formato Array Directo)
+// Esta es la que usa el Tablero de Bitácora para el "Join" de nombres
+export async function apiGetProducts() {
+  try {
+    const out = await fetchAppsScript_(
+      { r: SCRIPT_ROUTES.PRODUCTS },
+      { next: { revalidate: 3600 } }
+    );
+    return out?.ok ? out.data : [];
+  } catch (e) {
+    console.error("Error obteniendo productos:", e);
+    return [];
+  }
+}
+
 // 2. DIMENSIONES
 export async function apiDimensions(product_id) {
   try {
     const out = await fetchAppsScript_(
-      { r: SCRIPT_ROUTES.DIMENSIONS, product_id }, // Uso de constante
+      { r: SCRIPT_ROUTES.DIMENSIONS, product_id },
       { next: { revalidate: 3600 } }
     );
     return out;
@@ -95,7 +102,7 @@ export async function apiDimensions(product_id) {
 export async function apiHistory(filters = {}) {
   try {
     const rawData = await fetchAppsScript_({
-      r: SCRIPT_ROUTES.HISTORY, // Uso de constante
+      r: SCRIPT_ROUTES.HISTORY,
       product_id: filters.product_id || "",
       lot: filters.lot || "",
       cavity: filters.cavity ?? "",
@@ -106,22 +113,16 @@ export async function apiHistory(filters = {}) {
       next: { revalidate: 300 } 
     });
 
-    // 3. Aplicar normalización a la respuesta
-    // Caso A: La respuesta es un array directo de mediciones
     if (Array.isArray(rawData)) {
       return rawData.map(normalizeMeasurement);
     } 
-    // Caso B: La respuesta es un objeto { ok: true, data: [...] } (común en APIs estructuradas)
     else if (rawData?.data && Array.isArray(rawData.data)) {
       return { 
         ...rawData, 
         data: rawData.data.map(normalizeMeasurement) 
       };
     }
-
-    // Si hubo error o formato desconocido, devolvemos tal cual
     return rawData;
-
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
   }
@@ -131,7 +132,7 @@ export async function apiHistory(filters = {}) {
 export async function apiPostMeasurements(payload) {
   try {
     const out = await fetchAppsScript_(
-      { r: SCRIPT_ROUTES.MEASUREMENTS }, // Uso de constante
+      { r: SCRIPT_ROUTES.MEASUREMENTS },
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -145,14 +146,81 @@ export async function apiPostMeasurements(payload) {
   }
 }
 
+// 5. COLORES
 export async function apiColors() {
   try {
     const out = await fetchAppsScript_(
-      { r: SCRIPT_ROUTES.COLORS }, // Usa la constante nueva
-      { next: { revalidate: 3600 } } // Cache de 1 hora está bien para colores
+      { r: SCRIPT_ROUTES.COLORS },
+      { next: { revalidate: 3600 } }
     );
     return out;
   } catch (e) {
     return { ok: false, error: String(e?.message || e) };
+  }
+}
+
+/* ==================================================================================
+   MÓDULO BITÁCORA & APPSHEET (INTEGRACIÓN)
+   ================================================================================== */
+
+// A. Obtener Órdenes Activas desde AppSheet (Filtradas por Origen)
+export async function apiGetActiveOrders(sourceType) {
+  try {
+    const out = await fetchAppsScript_(
+      { r: SCRIPT_ROUTES.ORDERS, source: sourceType }, 
+      { next: { revalidate: 0 } } // Sin caché para tiempo real
+    );
+    return out?.ok ? out.data : [];
+  } catch (e) {
+    console.error("Error fetching orders:", e);
+    return [];
+  }
+}
+
+// B. Obtener Historial Completo de Bitácora
+export async function apiGetFullLogbook() {
+  try {
+    const out = await fetchAppsScript_(
+      { r: SCRIPT_ROUTES.LOGBOOK_FULL }, 
+      { next: { revalidate: 0 } }
+    );
+    return out?.ok ? out.data : [];
+  } catch (e) {
+    console.error("Error fetching logbook:", e);
+    return [];
+  }
+}
+
+// C. Crear Nuevo Turno (Sesión)
+export async function apiCreateLogbookSession(payload) {
+  // payload: { turno, inspector }
+  try {
+    return await fetchAppsScript_(
+      { r: SCRIPT_ROUTES.LOGBOOK_CREATE },
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        cache: "no-store"
+      }
+    );
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+// D. Agregar Evento (Incidencia)
+export async function apiAddLogbookEvent(payload) {
+  // payload: { bitacora_id, mensaje, prioridad, orden }
+  try {
+    return await fetchAppsScript_(
+      { r: SCRIPT_ROUTES.LOGBOOK_ADD_EVENT },
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        cache: "no-store"
+      }
+    );
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
 }

@@ -6,7 +6,7 @@ import Image from "next/image";
 import { Icons } from "@/components/ui/Icons";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight } from "lucide-react";
 
 const NAV = [
   {
@@ -14,6 +14,7 @@ const NAV = [
     items: [
       { href: "/dashboard", title: "Panel de Monitoreo", icon: Icons.Dashboard },
       { href: "/inspeccion", title: "Nueva Inspección", icon: Icons.Ruler },
+      { href: "/bitacora", title: "Bitácora", icon: BookOpen },
     ],
   },
   {
